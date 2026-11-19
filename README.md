@@ -26,6 +26,16 @@
 
 ---
 
+## 📸 界面预览
+
+| 因子监控（真实行情 + 五因子得分条形） | 真实期权链（IO / ETF，含 IV 与 Delta） |
+| --- | --- |
+| ![因子监控](docs/screenshots/main.png) | ![期权观察](docs/screenshots/options.png) |
+
+![个股折线图](docs/screenshots/chart.png)
+
+---
+
 ## 🚀 快速开始（Windows）
 
 ### 方式 A：双击启动（推荐，不需要打包）

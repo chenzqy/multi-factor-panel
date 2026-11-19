@@ -241,6 +241,67 @@ def _fetch_a_spot_sina(codes: List[str]) -> Optional[pd.DataFrame]:
         return None
 
 
+_A_KLINE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Referer": "https://finance.sina.com.cn",
+}
+_SINA_A_METRICS_CACHE: Dict[str, tuple] = {}
+
+
+def _sina_symbol(code: str) -> str:
+    """6 位代码转新浪代码：6/9 开头 sh，4/8 开头 bj，其余 sz。"""
+    code = str(code).zfill(6)
+    if code[0] in ("6", "9"):
+        return "sh" + code
+    if code[0] in ("4", "8"):
+        return "bj" + code
+    return "sz" + code
+
+
+def _sina_a_daily_metrics(code: str, window: int = 20) -> Dict[str, float]:
+    """用新浪日线算动量与波动；东财被限流时这是唯一可用的历史数据源。
+
+    结果缓存 600 秒，避免同一次刷新重复请求。
+    """
+    key = f"{code}|{window}"
+    hit = _SINA_A_METRICS_CACHE.get(key)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    url = (
+        "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData"
+        f"?symbol={_sina_symbol(code)}&scale=240&ma=no&datalen={window + 1}"
+    )
+    try:
+        req = urllib.request.Request(url, headers=_A_KLINE_HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            rows = json.loads(resp.read().decode("utf-8", "ignore"))
+        if not isinstance(rows, list) or len(rows) < 5:
+            return {}
+        closes = pd.Series([_scalar_float(r.get("close")) for r in rows], dtype="float64").dropna()
+        if len(closes) < 5:
+            return {}
+        momentum = (closes.iloc[-1] / closes.iloc[0] - 1) * 100
+        ret = closes.pct_change().dropna()
+        volatility = float(ret.std()) if len(ret) > 1 else float("nan")
+        metrics = {"momentum_20d": float(momentum), "volatility_20d": volatility}
+        _SINA_A_METRICS_CACHE[key] = (time.time(), metrics)
+        return metrics
+    except Exception:
+        return {}
+
+
+def _sina_a_metrics_batch(codes: List[str], window: int = 20) -> Dict[str, Dict[str, float]]:
+    """并发补齐一批代码的动量/波动。"""
+    result: Dict[str, Dict[str, float]] = {}
+    if not codes:
+        return result
+    with futures.ThreadPoolExecutor(max_workers=8) as pool:
+        for code, metrics in zip(codes, pool.map(lambda c: _sina_a_daily_metrics(c, window), codes)):
+            if metrics:
+                result[str(code)] = metrics
+    return result
+
+
 def fetch_a_live(codes: List[str], window: int = 20) -> Optional[pd.DataFrame]:
     """组装 A 股实时行情 + 历史指标 + ROE；整体失败返回 None。"""
     df = _fetch_a_spot(codes)
@@ -251,9 +312,18 @@ def fetch_a_live(codes: List[str], window: int = 20) -> Optional[pd.DataFrame]:
     if df is None or df.empty:
         return None
 
+    if fallback:
+        # 东财已被限流：逐只历史/ROE 一律走东财会加剧封禁，
+        # 这里改用新浪日线补动量与波动（不含 ROE，由因子层按中性处理）。
+        metrics_map = _sina_a_metrics_batch(df["code"].astype(str).tolist(), window)
+        for idx, row in df.iterrows():
+            metrics = metrics_map.get(str(row["code"]))
+            if metrics:
+                df.at[idx, "momentum_20d"] = metrics["momentum_20d"]
+                df.at[idx, "volatility_20d"] = metrics["volatility_20d"]
+        return df[COLUMNS].copy()
+
     for idx, row in df.iterrows():
-        if fallback:
-            break  # 东财已在限流，跳过逐只历史/ROE 请求，避免进一步触发封禁
         metrics = _fetch_a_history(row["code"], window)
         if metrics:
             df.at[idx, "momentum_20d"] = metrics["momentum_20d"]
@@ -273,7 +343,8 @@ _EM_MARKET = {"OQ": 105, "N": 106, "AM": 107}  # 纳斯达克 / 纽交所 / 美�
 _US_EXTRAS_CACHE: Dict[str, tuple] = {}
 
 
-def _to_float(value) -> Optional[float]:
+def _scalar_float(value) -> Optional[float]:
+    """把单个标量（字符串 / 数字 / None）转为 float；失败返回 None。"""
     try:
         num = float(value)
     except (TypeError, ValueError):
@@ -309,12 +380,12 @@ def _tx_us_quotes(codes: List[str]) -> Dict[str, Dict]:
         quotes[key] = {
             "name": parts[1] or key,
             "market": parts[2] or "",         # 例如 AAPL.OQ / BABA.N
-            "price": _to_float(parts[3]),
-            "prev_close": _to_float(parts[4]),
-            "change_pct": _to_float(parts[32]),
-            "amount": (_to_float(parts[37]) or 0.0) / 1e8,  # 美元 → 亿美元
-            "pe": _to_float(parts[39]),
-            "eps": _to_float(parts[46]),
+            "price": _scalar_float(parts[3]),
+            "prev_close": _scalar_float(parts[4]),
+            "change_pct": _scalar_float(parts[32]),
+            "amount": (_scalar_float(parts[37]) or 0.0) / 1e8,  # 美元 → 亿美元
+            "pe": _scalar_float(parts[39]),
+            "eps": _scalar_float(parts[46]),
         }
     return quotes
 
@@ -351,7 +422,7 @@ def _em_us_pb_batch(items: List[Dict]) -> Dict[str, float]:
             diff = (json.loads(raw).get("data") or {}).get("diff") or []
             for row in diff:
                 # ulist 接口里 f23 = 市净率 ×100（stock/get 接口才是 f167）
-                value = _to_float(row.get("f23"))
+                value = _scalar_float(row.get("f23"))
                 code = row.get("f12")
                 if value and value > 0 and code:
                     out[str(code)] = value / 100.0
@@ -376,7 +447,7 @@ def _em_us_pb_single(code: str) -> Optional[float]:
                 urllib.request.Request(url, headers=_US_HEADERS), timeout=8
             ).read().decode("utf-8", "ignore")
             data = json.loads(raw).get("data") or {}
-            value = _to_float(data.get("f167"))
+            value = _scalar_float(data.get("f167"))
             if value and value > 0:
                 return value / 100.0
         except Exception:
@@ -403,7 +474,7 @@ def _us_daily_stats(code: str, window: int = 20) -> Dict:
         ).read().decode("utf-8", "ignore")
         start = raw.find("[")
         rows = json.loads(raw[start:]) if start >= 0 else []
-        closes = [v for v in (_to_float(r.get("c")) for r in rows) if v]
+        closes = [v for v in (_scalar_float(r.get("c")) for r in rows) if v]
         if len(closes) >= window + 1:
             seg = closes[-(window + 1):]
             out["momentum_20d"] = (seg[-1] / seg[0] - 1) * 100
