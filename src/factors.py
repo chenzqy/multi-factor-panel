@@ -53,17 +53,19 @@ def _percentile_score(series: pd.Series, direction: str) -> pd.Series:
 
 
 def _build_raw_factors(df: pd.DataFrame) -> pd.DataFrame:
-    """从原始行情/财务列构造各因子的原始值。"""
+    """从原始行情/财务列构造各因子的原始值（估值列越小越好，其余按方向表解释）。"""
     out = pd.DataFrame(index=df.index)
 
-    # 估值：PE、PB 等权合成；亏损(PE<=0)估值记为最差
-    pe = df["pe"].where(df["pe"] > 0, np.nan)
-    pe_score = pe.rank(pct=True)
-    pb_score = df["pb"].rank(pct=True)
-    out["valuation"] = ((pe_score + pb_score) / 2) * 100
-    # 仅对真实存在且非正的 PE（亏损股）记最差；缺失值保持中性，不计为亏损
-    loss_mask = df["pe"].notna() & (df["pe"] <= 0)
-    out.loc[loss_mask, "valuation"] = 0.0
+    # 估值：PE 与 PB 各自做百分位后相加（0~2，越小越便宜）。
+    # 亏损股（PE<=0）直接钉到最差值 2.0；PE 缺失但 PB 存在的按中性 0.5 处理，
+    # 不能因为"数据没取到"就被当成亏损股。
+    pe = pd.to_numeric(df["pe"], errors="coerce")
+    pb = pd.to_numeric(df["pb"], errors="coerce")
+    pe_valid = pe.where(pe > 0)
+    combo = pe_valid.rank(pct=True).fillna(0.5) + pb.rank(pct=True)
+    loss_mask = pe.notna() & (pe <= 0)
+    combo = combo.mask(loss_mask, 2.0)
+    out["valuation"] = combo
 
     out["momentum"] = df["momentum_20d"]
     out["quality"] = df["roe"]

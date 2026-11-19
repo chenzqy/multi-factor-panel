@@ -6,6 +6,8 @@
 ![PySide6](https://img.shields.io/badge/PySide6-6.5%2B-41CD52?logo=qt&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+[![CI](https://github.com/chenzqy/multi-factor-panel/actions/workflows/ci.yml/badge.svg)](https://github.com/chenzqy/multi-factor-panel/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/chenzqy/multi-factor-panel?display_name=tag&sort=semver)](https://github.com/chenzqy/multi-factor-panel/releases)
 
 > 本项目仅为工具与教学演示，所有数据、因子得分与理论定价均不构成任何投资建议。
 
@@ -61,6 +63,44 @@ python desktop_app.py
 
 ---
 
+## 🧪 开发与测试
+
+```bat
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+测试不依赖 PySide6 / akshare / 网络，只覆盖纯逻辑与仓库卫生：
+
+| 测试文件 | 覆盖内容 |
+| --- | --- |
+| `tests/test_factors.py` | 因子打分：排名连续性、亏损股 PE≤0 判最差、**PE 缺失不算亏损**、单标的退化为中性 50、权重归一化、`attrs` 透传 |
+| `tests/test_repo_smoke.py` | 全仓 `compileall`、`watchlist.yaml` 可解析且 `api_key` 为空、离线代码表存在、无本机绝对路径 |
+
+> 单标的那条测试对应一个真实 bug：加密市场只有 BTC 一个标的时，`rank(pct=True)` 恒等于 1.0，会让"越低越好"的波动因子恒得 0 分。
+
+### 持续集成
+
+`.github/workflows/ci.yml` 在 Ubuntu 与 Windows 上跑 Python 3.10 / 3.12 矩阵：
+
+1. `compileall` 语法检查；
+2. `pytest` 单元测试；
+3. 编码与卫生检查——所有文本文件必须是合法 UTF-8，禁止出现疑似 API Key、本机路径、`config/ui_state.json`。
+
+### 自动发布
+
+`.github/workflows/release.yml` 支持两种触发：
+
+```bat
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+或在 Actions 页面手动 `Run workflow` 并填版本号。CI 会在 `windows-latest` 上用 `MultiFactorPanel.spec` 打包成单文件 exe，
+连同 `SHA256` 一起发布到 Releases（`MultiFactorPanel.exe` + `MultiFactorPanel-windows-x64.zip`）。
+
+---
+
 ## 🗂 项目结构
 
 ```
@@ -72,7 +112,13 @@ multi_factor_panel/
 ├── build_windows.bat         # 一键打包 exe
 ├── requirements.txt          # 完整依赖
 ├── requirements-desktop.txt  # 桌面版最小依赖（bat 脚本使用）
+├── requirements-dev.txt      # 跑单元测试所需（无 GUI 依赖）
 ├── MultiFactorPanel.spec     # PyInstaller 配置
+├── tests/                    # 单元测试（因子打分 / 语法 / 配置卫生）
+├── docs/
+│   ├── ARCHITECTURE.md       # 分层结构、降级链、关键设计取舍
+│   ├── DATA-SOURCES.md       # ★ 数据源口径与限流应对（复刻必读）
+│   └── screenshots/          # 界面截图
 ├── config/
 │   └── watchlist.yaml        # 股票池、权重、新闻源、DeepSeek、期权品种等全部配置
 ├── data/
@@ -181,6 +227,8 @@ settings:
 
 1. **股指期权的标的是股指期货**，不是沪深 300 现货。程序先用看跌-看涨平价 `F = K + (C − P)·e^{rT}` 反解隐含远期，再以 `S = F`、`q = r` 反解隐含波动率；否则会得到「Call 13% vs Put 25.7%」的假微笑。
 2. ETF 期权到期日为**第四个周三**，中金所股指期权为**第三个周五**。
+
+> 每个接口的字段含义、限流表现、失效通道与降级策略，全部整理在 **[docs/DATA-SOURCES.md](docs/DATA-SOURCES.md)**。想复刻或换数据源，先读这份文档能省掉大量试错。
 
 ---
 

@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（会作为 release tag，例如 v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: 打包 Windows exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: PyInstaller 打包
+        run: python -m PyInstaller MultiFactorPanel.spec --noconfirm --clean
+
+      - name: 收集产物
+        shell: pwsh
+        run: |
+          $zip = "MultiFactorPanel-windows-x64.zip"
+          if (-not (Test-Path "dist\MultiFactorPanel.exe")) { throw "打包失败：未生成 dist\MultiFactorPanel.exe" }
+          Compress-Archive -Path "dist\MultiFactorPanel.exe", "README.md" -DestinationPath $zip -Force
+          $size = (Get-Item "dist\MultiFactorPanel.exe").Length / 1MB
+          "exe 体积: {0:N1} MB" -f $size
+          Get-FileHash $zip -Algorithm SHA256 | ForEach-Object { "SHA256: $($_.Hash)" }
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiFactorPanel-windows-x64
+          path: |
+            dist/MultiFactorPanel.exe
+            MultiFactorPanel-windows-x64.zip
+          retention-days: 14
+
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/MultiFactorPanel.exe
+            MultiFactorPanel-windows-x64.zip
+          body: |
+            多因子监控面板 Windows 便携版。
+
+            - 单文件 exe，双击即用，无需安装 Python
+            - 首次启动体积较大、解压耗时略长属正常现象
+            - 数据来源与限流说明见 [docs/DATA-SOURCES.md](docs/DATA-SOURCES.md)
+            - 本项目仅为工具与教学演示，不构成任何投资建议
