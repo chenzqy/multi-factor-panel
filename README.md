@@ -9,6 +9,8 @@
 [![CI](https://github.com/chenzqy/multi-factor-panel/actions/workflows/ci.yml/badge.svg)](https://github.com/chenzqy/multi-factor-panel/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/chenzqy/multi-factor-panel?display_name=tag&sort=semver)](https://github.com/chenzqy/multi-factor-panel/releases)
 
+> **直接下载**：[MultiFactorPanel.exe](https://github.com/chenzqy/multi-factor-panel/releases/latest/download/MultiFactorPanel.exe)（单文件免安装，约 87 MB）· [zip 打包版](https://github.com/chenzqy/multi-factor-panel/releases/latest/download/MultiFactorPanel-windows-x64.zip)
+
 > 本项目仅为工具与教学演示，所有数据、因子得分与理论定价均不构成任何投资建议。
 
 ---
