@@ -1,0 +1,11 @@
+# 桌面版依赖清单
+# 双击 run_windows.bat 或 build_windows.bat 时会自动安装
+PySide6>=6.5
+pandas>=2.0
+PyYAML>=6.0
+akshare>=1.14
+yfinance>=1.8
+feedparser>=6.0
+requests>=2.28
+# 接入 DeepSeek Harness（dsh）作为 MCP 服务端时才需要；仅跑桌面程序时可不装
+mcp>=1.0,<2.0

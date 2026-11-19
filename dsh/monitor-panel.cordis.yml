@@ -1,0 +1,37 @@
+# ============================================================================
+# DeepSeek Harness（dsh）接入本监控面板的 MCP 配置（stdio 本地子进程）
+#
+# 作用：让 dsh 里的 DeepSeek Agent 自动调用本面板的数据工具：
+#   mcp__monitor__list_stock_scores   当前股票多因子打分排名
+#   mcp__monitor__get_stock_detail    单只个股完整明细
+#   mcp__monitor__list_latest_news    最新全球财经快讯
+#   mcp__monitor__list_watchlist      自选股票清单
+#
+# 使用前必改：
+#   1. 把下面 args 里的路径，替换为本软件解压后 mcp_server.py 的实际绝对路径。
+#      例如软件放在 D:\tools\multi_factor_panel，则写成：
+#        args: ["D:\\tools\\multi_factor_panel\\mcp_server.py"]
+#   2. command 填本机可用的 Python 启动命令：
+#      - 一般是 python；
+#      - 若终端提示找不到 python，改成 py（Windows py launcher）。
+#   3. 先在本机装好 MCP 依赖：pip install mcp pandas pyyaml akshare yfinance feedparser requests
+#
+# 临时启用（不改全局配置）：
+#   dsh web --patch "本文件的绝对路径"
+#
+# 长期生效：把下面 - insert: 这一整段合并进
+#   $DSH_HOME/cordis.patch.yml（对本机所有 profile 生效）
+# 或 $DSH_HOME/profiles/<profile名>/cordis.patch.yml（仅对指定 profile 生效）。
+# 不要覆盖已有文件，里面可能已有其他配置。
+# ============================================================================
+
+- insert:
+    - id: monitor-panel-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: monitor
+        transport: stdio
+        command: python
+        args:
+          - "C:\\path\\to\\multi_factor_panel\\mcp_server.py"
+        env: {}

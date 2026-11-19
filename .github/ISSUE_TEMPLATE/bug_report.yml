@@ -1,0 +1,60 @@
+name: Bug 报告
+description: 程序报错、数据显示异常、崩溃等问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先看 README 的「常见问题」与「已知限制」，很多问题（东财限流、ROE 为空、美股分时缺失）是已知行为。
+  - type: textarea
+    id: what
+    attributes:
+      label: 问题描述
+      description: 发生了什么？期望的结果是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 双击 run_windows.bat
+        2. 市场切到「美股」
+        3. 点刷新
+        4. 价格列全为「—」
+    validations:
+      required: true
+  - type: dropdown
+    id: market
+    attributes:
+      label: 涉及的市场 / 模块
+      multiple: true
+      options:
+        - A 股
+        - 美股
+        - 加密货币
+        - 期权观察
+        - 折线图
+        - 全球新闻
+        - AI 助手
+        - MCP 服务端
+        - 启动 / 打包
+        - 其他
+  - type: input
+    id: os
+    attributes:
+      label: 系统与 Python 版本
+      placeholder: Windows 11 23H2 / Python 3.12.10
+    validations:
+      required: true
+  - type: input
+    id: deps
+    attributes:
+      label: 关键依赖版本
+      placeholder: akshare 1.20.65 / PySide6 6.12.0 / pandas 3.1.1
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或报错栈
+      description: 启动日志在 logs/launcher.log；命令行运行可直接贴控制台输出
+      render: shell

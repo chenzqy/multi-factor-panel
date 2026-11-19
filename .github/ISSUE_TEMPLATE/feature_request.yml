@@ -1,0 +1,33 @@
+name: 功能建议
+description: 希望增加的数据源、因子、界面能力
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: 想要什么
+      description: 一句话说明需求，再补充使用场景
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 为什么需要
+      description: 现在的做法哪里不方便？
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 大致涉及
+      options:
+        - 新市场 / 新资产类别
+        - 新数据源（替代限流的接口）
+        - 新因子或打分逻辑
+        - 界面交互
+        - 期权模块
+        - MCP 工具
+        - 文档
+  - type: textarea
+    id: impl
+    attributes:
+      label: 可选：实现思路
+      description: 如果知道可用的公开接口，请贴出来（URL + 字段口径），这样最容易落地
