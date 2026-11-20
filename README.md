@@ -32,11 +32,28 @@
 
 ## 📸 界面预览
 
+**因子监控** —— 五因子横截面打分，条形图直接看出强项弱项：
+
+![因子监控演示](docs/screenshots/demo-factors.gif)
+
+**真实期权链** —— 切到期权页、一键拉链，IV 与 Delta 由市场价反解：
+
+![期权链演示](docs/screenshots/demo-options.gif)
+
+**个股折线图** —— 双击任意行弹出的独立窗口，当日分时 / 日线切换：
+
+![折线图演示](docs/screenshots/demo-chart.gif)
+
+<details>
+<summary>展开静态大图（因子表 / 期权链 / 折线图）</summary>
+
 | 因子监控（真实行情 + 五因子得分条形） | 真实期权链（IO / ETF，含 IV 与 Delta） |
 | --- | --- |
 | ![因子监控](docs/screenshots/main.png) | ![期权观察](docs/screenshots/options.png) |
 
 ![个股折线图](docs/screenshots/chart.png)
+
+</details>
 
 ---
 
@@ -62,6 +79,34 @@
 python -m pip install -r requirements.txt
 python desktop_app.py
 ```
+
+### 方式 D：不装 GUI，20 秒验证它真能跑
+
+只要装了 Python 和 `pandas / numpy / pyyaml`，就能在终端里跑通整条数据链路（拉行情 → 打分 → 排名），不需要 PySide6、不需要开窗口：
+
+```bat
+python -m pip install -r requirements-desktop.txt
+python -m src.cli
+python -m src.cli --market 美股 --top 3
+python -m src.cli --source codes      # 完全不联网，只验证离线代码表与打分逻辑
+```
+
+典型输出：
+
+```text
+市场：A股　数据来源：auto
+股票池：A 股 57 只 / 美股 65 只 / 加密 1 个
+------------------------------------------------------------------------
+耗时 9.4s　标的 57 只　数据档位：live
+　缺数：PE 缺 57/57，PB 缺 57/57，ROE 缺 57/57
+------------------------------------------------------------------------
+排名  代码      名称               最新价     涨跌幅%     综合分    评级
+1   600887  伊利股份           32.91     1.60    67.4    偏强
+2   000333  美的集团           95.01     1.45    67.0    偏强
+3   601318  中国平安           54.66     0.48    66.0    偏强
+```
+
+> 「数据档位：live / codes」直接告诉你现在用的是实时行情还是离线代码表；「缺数」一行列出这一档数据源缺了哪些字段——这就是本项目的核心哲学：**宁可显示「—」，也不假装有数据。**
 
 ---
 
@@ -120,7 +165,8 @@ multi_factor_panel/
 ├── docs/
 │   ├── ARCHITECTURE.md       # 分层结构、降级链、关键设计取舍
 │   ├── DATA-SOURCES.md       # ★ 数据源口径与限流应对（复刻必读）
-│   └── screenshots/          # 界面截图
+│   ├── DATA-SOURCE-FALLBACK.md  # ★ 行情接口挂了怎么办（按症状排查）
+│   └── screenshots/          # 界面截图与演示 GIF
 ├── config/
 │   └── watchlist.yaml        # 股票池、权重、新闻源、DeepSeek、期权品种等全部配置
 ├── data/
@@ -157,6 +203,25 @@ flowchart LR
     G[src/options.py] --> E
     H[src/news.py] --> E
 ```
+
+---
+
+## 🆚 为什么不直接调 akshare
+
+很多人的第一反应是「我自己写 30 行 akshare 就能出这张表」。可以，但下面这些坑每一条都要重新踩一遍：
+
+| 场景 | 直接调 akshare / 公开接口 | 本项目 |
+| --- | --- | --- |
+| **期权链** | 拉到的只是合约代码与报价，想得到 IV / Delta 得自己反解；股指期权的标的还是**股指期货**，用沪深 300 现货去算会得到「Call 13% vs Put 25.7%」的假微笑 | 先用看跌-看涨平价 `F = K + (C − P)·e^{rT}` 反解隐含远期，再反解 IV；Call/Put 两侧波动率对齐 |
+| **字段口径** | 每个接口字段含义不同，东财 `ulist` 里 `f23` 才是 PB×100、`f167` 是别的东西；腾讯报价 `[39]` 是 PE、`[46]` 是 EPS | 全部整理成 12 列统一 schema：`code/name/price/change_pct/pe/pb/roe/momentum_20d/volatility_20d/turnover/amount/volume_ratio` |
+| **限流** | 东财 `push2` 一限流就是 `Push2RateLimitError`，并发 130 直接 502，恢复窗口从 5 分钟累加到 40 分钟 | 三级降级链（东财 → 新浪 → 代码表），并发压到 6~8，界面上明确标出当前数据档位 |
+| **数据源失效** | akshare 频繁改名：`stock_zh_a_hist` → `stock_zh_a_hist_em`、`option_current_em` → `option_realtime_em`，升级就 AttributeError | 已改用新名，并把每个接口的**失效表现**写进 [docs/DATA-SOURCES.md](docs/DATA-SOURCES.md) 和 [docs/DATA-SOURCE-FALLBACK.md](docs/DATA-SOURCE-FALLBACK.md) |
+| **跨市场** | A 股 / 美股 / 加密三套完全不同的接口、字段、货币，写三遍横截面打分逻辑 | 三市场同构：统一 schema 后跑同一套五因子打分，美股与加密自动折人民币显示 |
+| **缺数处理** | `NaN` 参与排序会静默变成最小值，亏损股（PE ≤ 0）反而拿最高估值得分 | 缺失按中性 50 分；PE ≤ 0 明确钉到最差；单标的时不做百分位（恒等陷阱），直接给中性 |
+| **接入 Agent** | 要自己写 MCP server、定义工具 schema、处理 stdio 生命周期 | `mcp_server.py` 已暴露 6 个只读工具，dsh 里一行配置接进来 |
+| **分时图** | 拿到的 K 线跨夜会连成假斜线，午休 11:30–13:00 会留出空档 | 按最后交易日过滤 + 等距序号分类轴，两点都处理掉了 |
+
+一句话总结：**这不是「又一个 akshare 封装」，而是把「免费行情源的脾气」沉淀成代码和文档。**
 
 ---
 
@@ -231,6 +296,8 @@ settings:
 2. ETF 期权到期日为**第四个周三**，中金所股指期权为**第三个周五**。
 
 > 每个接口的字段含义、限流表现、失效通道与降级策略，全部整理在 **[docs/DATA-SOURCES.md](docs/DATA-SOURCES.md)**。想复刻或换数据源，先读这份文档能省掉大量试错。
+>
+> **某一列突然变成「—」？** 先看 **[docs/DATA-SOURCE-FALLBACK.md](docs/DATA-SOURCE-FALLBACK.md)** —— 按「症状 → 原因 → 处理」排查，覆盖东财限流、新浪降级、akshare 改名、期权链空白、美股代码格式、加密域名不可达、折线图假斜线七类高频故障。
 
 ---
 
