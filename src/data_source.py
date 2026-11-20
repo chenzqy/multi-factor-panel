@@ -122,8 +122,133 @@ def _fetch_a_roe(code: str) -> Optional[float]:
         return None
 
 
+_A_ROE_TTL = 6 * 3600  # 财务数据按季度更新，6 小时内不必重取
+_A_ROE_FILE_CACHE: Dict[str, tuple] = {}
+_A_ROE_LOADED = False
+
+
+def _roe_store_path() -> str:
+    return os.path.join(paths.cache_dir(), "roe_a.json")
+
+
+def _roe_load() -> Dict[str, tuple]:
+    """把磁盘上的 ROE 缓存读进内存（只读一次）。"""
+    global _A_ROE_LOADED
+    if _A_ROE_LOADED:
+        return _A_ROE_FILE_CACHE
+    _A_ROE_LOADED = True
+    try:
+        with open(_roe_store_path(), encoding="utf-8") as fp:
+            raw = json.load(fp)
+        if isinstance(raw, dict):
+            for key, pair in raw.items():
+                if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                    _A_ROE_FILE_CACHE[str(key)] = (float(pair[0]), float(pair[1]))
+    except Exception:
+        pass
+    return _A_ROE_FILE_CACHE
+
+
+def _roe_save() -> None:
+    try:
+        payload = {k: [v[0], v[1]] for k, v in _A_ROE_FILE_CACHE.items()}
+        with open(_roe_store_path(), "w", encoding="utf-8") as fp:
+            json.dump(payload, fp, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _fetch_a_roe_cached(code: str, allow_fetch: bool = True) -> Optional[float]:
+    """读 ROE：内存 + 磁盘双缓存，过期后按需回源。
+
+    ``allow_fetch=False`` 时只用已有缓存（缺就返回 None），
+    用于首屏快速出表——57 次东财财务请求要 12 秒，不能挡在启动路径上。
+    """
+    key = str(code).zfill(6)
+    store = _roe_load()
+    hit = store.get(key)
+    if hit and time.time() - hit[0] < _A_ROE_TTL:
+        return hit[1]
+    if not allow_fetch:
+        return hit[1] if hit else None
+    val = _fetch_a_roe(key)
+    if val is not None:
+        store[key] = (time.time(), val)
+        _roe_save()
+    return val
+
+
+_EM_ULIST_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+_EM_UT = "fa5fd1943c7b386f172d6893dbfba10b"
+_EM_A_FIELDS = "f2,f3,f6,f8,f9,f10,f12,f14,f23"
+_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+
+def _a_secid(code: str) -> str:
+    """东财 secid：6/9 开头属沪市(1.)，其余（含北交所 4/8）属深/北(0.)。"""
+    code = str(code).zfill(6)
+    return ("1." if code[0] in ("6", "9") else "0.") + code
+
+
+def _fetch_a_spot_batch(codes: List[str], batch: int = 30) -> Optional[pd.DataFrame]:
+    """东财 ulist 批量快照：按 secids 精确取，一次请求覆盖 30 只。
+
+    ``ak.stock_zh_a_spot_em()`` 是全市场口径（5000+ 只、实测 59 次分页请求、
+    耗时 90 秒以上），我们只需要自选池那几十只，用 ulist 精确取约 0.3 秒。
+    """
+    if not codes:
+        return None
+    rows: List[Dict] = []
+    for start in range(0, len(codes), batch):
+        chunk = [str(c).zfill(6) for c in codes[start:start + batch]]
+        secids = ",".join(_a_secid(c) for c in chunk)
+        url = (f"{_EM_ULIST_URL}?fltt=2&invt=2&ut={_EM_UT}"
+               f"&fields={_EM_A_FIELDS}&secids={secids}")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "ignore"))
+        except Exception:
+            continue
+        diff = (payload.get("data") or {}).get("diff") or []
+        if isinstance(diff, dict):
+            diff = list(diff.values())
+        rows.extend(diff)
+    if not rows:
+        return None
+
+    recs: List[Dict] = []
+    for r in rows:
+        code = str(r.get("f12") or "").zfill(6)
+        if not code or not code.strip("0") or code not in set(map(str, codes)):
+            continue
+        pe = _scalar_float(r.get("f9"))
+        pb = _scalar_float(r.get("f23"))
+        amount = _scalar_float(r.get("f6"))
+        recs.append({
+            "code": code,
+            "name": str(r.get("f14") or ""),
+            "price": _scalar_float(r.get("f2")),
+            "change_pct": _scalar_float(r.get("f3")),
+            "pe": pe,
+            "pb": pb,
+            "roe": pd.NA,
+            "momentum_20d": pd.NA,
+            "volatility_20d": pd.NA,
+            "turnover": _scalar_float(r.get("f8")),
+            "amount": amount / 1e8 if amount is not None else None,  # 元 -> 亿元
+            "volume_ratio": _scalar_float(r.get("f10")),
+        })
+    if not recs:
+        return None
+    return pd.DataFrame(recs, columns=COLUMNS)
+
+
 def _fetch_a_spot(codes: List[str]) -> Optional[pd.DataFrame]:
-    """全市场快照按自选股过滤；失败返回 None。"""
+    """A 股实时快照：优先东财 ulist 批量，失败再退 akshare 全市场。"""
+    fast = _fetch_a_spot_batch(codes)
+    if fast is not None and not fast.empty:
+        return fast
     try:
         import akshare as ak
     except Exception:
@@ -295,43 +420,66 @@ def _sina_a_metrics_batch(codes: List[str], window: int = 20) -> Dict[str, Dict[
     result: Dict[str, Dict[str, float]] = {}
     if not codes:
         return result
-    with futures.ThreadPoolExecutor(max_workers=8) as pool:
+    workers = min(16, max(4, len(codes)))
+    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
         for code, metrics in zip(codes, pool.map(lambda c: _sina_a_daily_metrics(c, window), codes)):
             if metrics:
                 result[str(code)] = metrics
     return result
 
 
-def fetch_a_live(codes: List[str], window: int = 20) -> Optional[pd.DataFrame]:
+def _enrich_a_metrics(df: pd.DataFrame, window: int = 20,
+                      roe_mode: str = "live") -> pd.DataFrame:
+    """并发补齐动量 / 波动 / ROE，替代原先的逐只串行循环。
+
+    旧实现按 ``for idx, row in df.iterrows()`` 顺序请求，
+    57 只股票要发 114 次 HTTP（每只日线 + 每只 ROE），单次刷新 10 秒以上。
+
+    ``roe_mode``：
+        live    —— 缺就回源东财财务接口（首次慢约 12 秒，之后走缓存）
+        cached  —— 只用已缓存的 ROE，缺失留空，用于首屏秒开
+        skip    —— 完全不碰 ROE（东财快照被限流时）
+    """
+    if df.empty:
+        return df
+    codes = [str(c).zfill(6) for c in df["code"].tolist()]
+    workers = min(16, max(4, len(codes)))
+    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        metrics_list = list(pool.map(lambda c: _sina_a_daily_metrics(c, window), codes))
+        if roe_mode == "skip":
+            roe_list = [None] * len(codes)
+        elif roe_mode == "cached":
+            roe_list = list(pool.map(lambda c: _fetch_a_roe_cached(c, allow_fetch=False), codes))
+        else:
+            roe_list = list(pool.map(_fetch_a_roe_cached, codes))
+
+    out = df.reset_index(drop=True).copy()
+    out["momentum_20d"] = [m.get("momentum_20d") for m in metrics_list]
+    out["volatility_20d"] = [m.get("volatility_20d") for m in metrics_list]
+    if roe_mode != "skip":
+        out["roe"] = roe_list
+    for col in ("momentum_20d", "volatility_20d", "roe"):
+        if col in out:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out
+
+
+def fetch_a_live(codes: List[str], window: int = 20,
+                 roe_mode: str = "live") -> Optional[pd.DataFrame]:
     """组装 A 股实时行情 + 历史指标 + ROE；整体失败返回 None。"""
     df = _fetch_a_spot(codes)
-    fallback = False
     if df is None or df.empty:
         df = _fetch_a_spot_sina(codes)  # 东财限流时退到新浪快照
-        fallback = True
+        df = None if (df is None or df.empty) else df
     if df is None or df.empty:
         return None
 
-    if fallback:
-        # 东财已被限流：逐只历史/ROE 一律走东财会加剧封禁，
-        # 这里改用新浪日线补动量与波动（不含 ROE，由因子层按中性处理）。
-        metrics_map = _sina_a_metrics_batch(df["code"].astype(str).tolist(), window)
-        for idx, row in df.iterrows():
-            metrics = metrics_map.get(str(row["code"]))
-            if metrics:
-                df.at[idx, "momentum_20d"] = metrics["momentum_20d"]
-                df.at[idx, "volatility_20d"] = metrics["volatility_20d"]
-        return df[COLUMNS].copy()
-
-    for idx, row in df.iterrows():
-        metrics = _fetch_a_history(row["code"], window)
-        if metrics:
-            df.at[idx, "momentum_20d"] = metrics["momentum_20d"]
-            df.at[idx, "volatility_20d"] = metrics["volatility_20d"]
-        roe = _fetch_a_roe(row["code"])
-        if roe is not None:
-            df.at[idx, "roe"] = roe
-    return df[COLUMNS].copy()
+    # 东财快照没拿到估值字段（PE 全空）说明正被限流：
+    # 此时连 ROE 一起跳过，避免 57 次财务接口请求把封禁时间拉长。
+    pe_available = not pd.to_numeric(df.get("pe"), errors="coerce").isna().all()
+    mode = roe_mode if pe_available else "skip"
+    enriched = _enrich_a_metrics(df, window, roe_mode=mode)
+    return enriched[COLUMNS].copy()
 
 
 # ===========================================================================
@@ -616,6 +764,63 @@ def fetch_us_live(us_items: List[Dict], window: int = 20) -> Optional[pd.DataFra
 
 
 # ===========================================================================
+# 磁盘快照：下次启动先渲染上次结果，再后台刷新（stale-while-revalidate）
+# ===========================================================================
+
+_SNAPSHOT_SLUG = {"A股": "a", "美股": "us", "加密货币": "crypto", "加密": "crypto"}
+_NUMERIC_COLS = ("price", "change_pct", "pe", "pb", "roe", "momentum_20d",
+                 "volatility_20d", "turnover", "amount", "volume_ratio")
+
+
+def _snapshot_file(market: str) -> str:
+    slug = _SNAPSHOT_SLUG.get(market, "misc")
+    return os.path.join(paths.cache_dir(), f"universe_{slug}.json")
+
+
+def save_snapshot(market: str, df: pd.DataFrame) -> None:
+    """把本轮成功结果落盘；任何异常都静默跳过，不影响主流程。"""
+    try:
+        payload = {
+            "saved_at": time.time(),
+            "source": df.attrs.get("source", "codes"),
+            "rows": json.loads(df.to_json(orient="records", force_ascii=False)),
+        }
+        with open(_snapshot_file(market), "w", encoding="utf-8") as fp:
+            json.dump(payload, fp, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def load_snapshot(market: str, max_age: float = 12 * 3600) -> Optional[pd.DataFrame]:
+    """读上次快照；文件缺失或超过 ``max_age`` 秒返回 None。"""
+    try:
+        path = _snapshot_file(market)
+        if not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8") as fp:
+            payload = json.load(fp)
+        if time.time() - float(payload.get("saved_at") or 0) > max_age:
+            return None
+        rows = payload.get("rows") or []
+        if not rows:
+            return None
+        frame = pd.DataFrame(rows)
+        for col in COLUMNS:
+            if col not in frame:
+                frame[col] = float("nan")
+        for col in _NUMERIC_COLS:
+            if col in frame:
+                frame[col] = pd.to_numeric(frame[col], errors="coerce")
+        frame = frame[COLUMNS].copy()
+        frame.attrs["source"] = payload.get("source", "codes")
+        frame.attrs["stale"] = True
+        frame.attrs["saved_at"] = payload.get("saved_at")
+        return frame
+    except Exception:
+        return None
+
+
+# ===========================================================================
 # 统一入口
 # ===========================================================================
 
@@ -623,7 +828,8 @@ def get_universe(market: str = "A股", source: str = "auto", window: int = 20,
                  watchlist: Optional[List[Dict]] = None,
                  us_watchlist: Optional[List[Dict]] = None,
                  pool_size: Optional[int] = None,
-                 crypto_list: Optional[List[str]] = None) -> pd.DataFrame:
+                 crypto_list: Optional[List[str]] = None,
+                 roe_mode: str = "live") -> pd.DataFrame:
     """
     返回监控股票池 DataFrame（全部来自真实在册代码，不含内置演示数据）。
 
@@ -691,7 +897,7 @@ def get_universe(market: str = "A股", source: str = "auto", window: int = 20,
     if market == "美股":
         live = fetch_us_live(items, window=window)
     else:
-        live = fetch_a_live(codes, window=window)
+        live = fetch_a_live(codes, window=window, roe_mode=roe_mode)
 
     if live is not None and not live.empty:
         name_map = {str(i["code"]): i.get("name") for i in items}
@@ -699,6 +905,7 @@ def get_universe(market: str = "A股", source: str = "auto", window: int = 20,
             lambda r: name_map.get(str(r["code"])) or r["name"], axis=1
         )
         live.attrs["source"] = "live"
+        save_snapshot(market, live)
         return live
 
     # 行情不可用（限流/无网）时返回真实代码表，不再回落到演示数据

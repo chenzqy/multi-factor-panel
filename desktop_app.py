@@ -134,6 +134,43 @@ class NewsWorker(QtCore.QThread):
         self.done.emit(self.result)
 
 
+class OptionWorker(QtCore.QThread):
+    """后台线程拉取期权链，避免主线程在 5~10 秒里假死。"""
+
+    done = QtCore.Signal(object, object, str)  # (chain, info, 错误信息)
+
+    def __init__(self, market: str, expiry: str) -> None:
+        super().__init__()
+        self.market = market
+        self.expiry = expiry
+
+    def run(self) -> None:
+        try:
+            chain = options.fetch_option_chain(market_key=self.market, expiry=self.expiry)
+            info = options.chain_summary(market_key=self.market, expiry=self.expiry)
+            self.done.emit(chain, info, "")
+        except Exception as exc:
+            self.done.emit(None, None, repr(exc))
+
+
+class UniverseWorker(QtCore.QThread):
+    """后台线程拉取行情，避免同步网络请求把主线程卡住十几秒。"""
+
+    done = QtCore.Signal(object, str, str)  # (DataFrame, 阶段, 错误信息)
+
+    def __init__(self, kwargs: dict, phase: str) -> None:
+        super().__init__()
+        self.kwargs = kwargs
+        self.phase = phase
+
+    def run(self) -> None:
+        try:
+            frame = data_source.get_universe(**self.kwargs)
+            self.done.emit(frame, self.phase, "")
+        except Exception as exc:
+            self.done.emit(None, self.phase, repr(exc))
+
+
 class AiWorker(QtCore.QThread):
     """后台线程调用 DeepSeek，避免网络请求阻塞界面。"""
 
@@ -397,6 +434,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.data_source_tag = "codes"
         self.news_df: pd.DataFrame = pd.DataFrame()
         self.chart_win = None
+        self._worker = None  # 当前正在跑的行情线程
+        self._opt_worker = None  # 当前正在跑的期权线程
 
         self._build_ui()
         # 先让窗口显示出来，再拉行情（否则启动时几十秒没有反应）
@@ -404,12 +443,24 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._startup_load)
 
     def _startup_load(self) -> None:
-        """窗口渲染完成后再做首次行情/新闻加载，避免启动黑屏等待。"""
+        """窗口渲染完成后先贴上次快照，再后台刷新，启动不再卡十几秒。"""
         QtWidgets.QApplication.processEvents()
+        shown = self._render_snapshot()
+        if shown:
+            self.status.showMessage("已显示上次缓存结果，正在后台刷新 …")
+        self.refresh(fast=not shown)
+        self.refresh_news()
+
+    def _render_snapshot(self) -> bool:
+        """把磁盘上的上次结果先画出来，成功返回 True。"""
         try:
-            self.refresh()
-        finally:
-            self.refresh_news()
+            frame = data_source.load_snapshot(self.market_box.currentText())
+        except Exception:
+            frame = None
+        if frame is None or frame.empty:
+            return False
+        self._apply_frame(frame, stale=True)
+        return True
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -887,40 +938,62 @@ class MainWindow(QtWidgets.QMainWindow):
             self.source_box.currentText()
         ]
 
-    def refresh(self) -> None:
-        market = self.market_box.currentText()
-        source = self._source_code()
+    def refresh(self, fast: bool = False) -> None:
+        """后台加载行情：主线程立即返回，结果回来后由回调填表。
+
+        ``fast=True`` 只读 ROE 缓存（约 1 秒出表），``fast=False`` 允许回源补齐。
+        """
+        if getattr(self, "_worker", None) is not None:
+            return  # 上一轮还没回来，忽略重复点击
         window = int(self.config.get("settings", {}).get("momentum_window", 20))
+        kwargs = dict(
+            market=self.market_box.currentText(),
+            source=self._source_code(),
+            window=window,
+            watchlist=self.config.get("stocks", []),
+            us_watchlist=self.config.get("us_stocks", []),
+            pool_size=self.config.get("settings", {}).get("pool_size"),
+            crypto_list=self.config.get("crypto", ["BTC"]),
+            roe_mode="cached" if fast else "live",
+        )
+        self.refresh_btn.setEnabled(False)
+        self.status.showMessage("正在后台刷新行情 …")
+        worker = UniverseWorker(kwargs, "cached" if fast else "live")
+        worker.done.connect(self._on_universe)
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker
+        worker.start()
 
-        self.status.showMessage("正在加载数据…")
-        QtWidgets.QApplication.processEvents()
-
-        try:
-            raw = data_source.get_universe(
-                market=market,
-                source=source,
-                window=window,
-                watchlist=self.config.get("stocks", []),
-                us_watchlist=self.config.get("us_stocks", []),
-                pool_size=self.config.get("settings", {}).get("pool_size"),
-                crypto_list=self.config.get("crypto", ["BTC"]),
+    def _on_universe(self, frame, phase: str, error: str) -> None:
+        self._worker = None
+        self.refresh_btn.setEnabled(True)
+        if frame is None or getattr(frame, "empty", True):
+            self.status.showMessage(
+                f"加载失败：{error}" if error else "没取到行情数据，已保留当前结果"
             )
-            weights = self.config.get("weights", {})
-            self.scored = factors.compute_factor_scores(raw, weights)
-            self.data_source_tag = raw.attrs.get("source", "codes")
-            tag = {
-                "live": "实时行情",
-                "crypto": "币安公开行情（USDT 计价）",
-                "codes": "真实代码表（行情接口未取到，仅有代码与名称）",
-            }.get(self.data_source_tag, self.data_source_tag)
-            self.status.showMessage(f"数据来源：{tag}　|　监控标的：{len(self.scored)}")
-        except Exception as exc:  # 兜底：任何异常都不让窗口崩溃
-            QtWidgets.QMessageBox.critical(self, "加载失败", f"数据加载出错：{exc}")
-            self.status.showMessage("加载失败，已保留上次结果")
             return
+        self._apply_frame(frame)
+        if phase == "cached" and "roe" in self.scored and self.scored["roe"].isna().any():
+            # 首屏已秒开，后台再补一轮完整数据（含 ROE），补完自动刷表
+            QtCore.QTimer.singleShot(80, lambda: self.refresh(fast=False))
 
+    def _apply_frame(self, frame, stale: bool = False) -> None:
+        market = self.market_box.currentText()
+        weights = self.config.get("weights", {})
+        self.scored = factors.compute_factor_scores(frame, weights)
+        self.data_source_tag = frame.attrs.get("source", "codes")
+        tag = {
+            "live": "实时行情",
+            "crypto": "币安公开行情（USDT 计价）",
+            "codes": "真实代码表（行情接口未取到，仅有代码与名称）",
+        }.get(self.data_source_tag, self.data_source_tag)
+        prefix = "上次缓存 · " if stale else ""
+        self.status.showMessage(f"{prefix}数据来源：{tag}　|　监控标的：{len(self.scored)}")
         self.apply_filter()
-        self.reload_option_expiries()
+        # 合约到期列表只跟市场有关，没必要每轮刷新都重新拉一遍
+        if not stale and getattr(self, "_opt_market", None) != market:
+            self._opt_market = market
+            self.reload_option_expiries()
 
     def apply_filter(self) -> None:
         if self.scored.empty:
@@ -988,6 +1061,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._col_widths = widths
         df = self._with_cny(self.filtered)
         self.detail.setText("点击任意一行查看该标的明细；点击表头可按该列排序。")
+        self.table.setUpdatesEnabled(False)
         self.table.setSortingEnabled(False)
         self.table.clearContents()
         self.table.setColumnCount(len(headers))
@@ -1014,6 +1088,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._resize_columns()
         self.table.setSortingEnabled(True)
+        self.table.setUpdatesEnabled(True)
         self._update_overview()
 
     # -------------------------------------------------- 因子监控展示细节
@@ -1278,18 +1353,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.opt_info.setText("合约列表获取失败，请检查网络后重试")
 
     def refresh_option_chain(self) -> None:
+        if getattr(self, "_opt_worker", None) is not None:
+            return
         market = self._current_market()
         expiry = self.opt_expiry.currentText().strip()
-        self.status.showMessage("正在拉取期权行情…")
-        QtWidgets.QApplication.processEvents()
-        try:
-            chain = options.fetch_option_chain(market_key=market, expiry=expiry)
-            info = options.chain_summary(market_key=market, expiry=expiry)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "期权拉取失败", f"行情接口出错：{exc}")
+        self.status.showMessage("正在后台拉取期权行情…")
+        self.opt_info.setText("正在拉取期权链，界面可继续操作 …")
+        worker = OptionWorker(market, expiry)
+        worker.done.connect(self._on_option_chain)
+        worker.finished.connect(worker.deleteLater)
+        self._opt_worker = worker
+        worker.start()
+
+    def _on_option_chain(self, chain, info, error: str) -> None:
+        self._opt_worker = None
+        if error:
+            QtWidgets.QMessageBox.warning(self, "期权拉取失败", f"行情接口出错：{error}")
             self.status.showMessage("期权行情拉取失败")
             return
-        if chain.empty:
+        if chain is None or getattr(chain, "empty", True):
             self.opt_info.setText("该合约暂无行情数据")
             self.opt_table.setRowCount(0)
             self.status.showMessage("该合约暂无行情数据")

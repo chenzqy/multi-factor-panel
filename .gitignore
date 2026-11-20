@@ -39,6 +39,7 @@ logs/
 config/ui_state.json
 config/*.local.yaml
 data/_archive/
+data/_cache/
 
 # ===== 本地密钥 / 覆盖配置 =====
 .env

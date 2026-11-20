@@ -2,6 +2,35 @@
 
 遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-11-20
+
+全面提速：从「打开先冻 15 秒」做到「窗口一出现就有数据，刷新不挡手」。
+
+### 性能
+
+- 行情加载移出主线程：新增 `UniverseWorker` / `OptionWorker` 两个 `QThread`，刷新与期权拉取全程不冻结界面，期间可自由切页、筛选、排序
+- A 股快照改走东方财富 `ulist` 批量接口，按自选池 `secids` 精确取数，**90s → 0.32s**（原来 `ak.stock_zh_a_spot_em()` 要拉全市场 5000+ 只、59 次分页）
+- 动量/波动改为线程池并发（`_enrich_a_metrics`），替代原先 57 只 × 2 次 HTTP 的串行循环，**约 10s → 0.58s**
+- ROE 双层缓存（内存 + 磁盘 `data/_cache/roe_a.json`，TTL 6 小时），并支持 `roe_mode=cached` 首屏只读缓存：**热启动 0.27s**
+- 启动先渲染磁盘快照（`data/_cache/universe_*.json`）再后台刷新，即 stale-while-revalidate：**窗口一出现即满表**
+- 表格填充加 `setUpdatesEnabled(False)` 包裹，消除逐格 `setItem` 的重复重绘
+- 期权到期列表按市场缓存，不再每轮刷新都重复请求
+
+### 实测（A 股 57 只）
+
+| 环节 | 改前 | 改后 |
+| --- | --- | --- |
+| 快照行情 | 90s（全市场分页） | 0.32s |
+| 动量 + 波动 | 10s+（串行） | 0.58s |
+| ROE 首次 / 热缓存 | 计入上面 10s+ / — | 12.6s（后台跑）/ 0.27s |
+| 界面首屏 | 窗口出现后冻结 9~17s | 窗口出现即有数据，全程不冻结 |
+
+### 新增
+
+- `src/paths.py`：`writable_dir()` / `cache_dir()`，兼容源码运行与 PyInstaller 打包的可写缓存目录
+- `data_source.load_snapshot()` / `save_snapshot()`：跨进程的行情快照缓存
+- `get_universe(..., roe_mode=)`：`live` / `cached` / `skip` 三档，调用方可自选精度与速度
+
 ## [1.0.0] - 2026-11-19
 
 首个开源版本。
