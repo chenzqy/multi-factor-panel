@@ -22,6 +22,50 @@ SYSTEM_PROMPT = (
     "回答简洁、分点清晰；明确说明数据可能滞后，所有内容仅供参考，不构成投资建议。"
 )
 
+# DeepSeek 开放平台目前只提供 deepseek-chat 与 deepseek-reasoner。
+# 历史配置里出现过的模型名（或从别家接口抄来的名字）在这里统一归一到官方模型，
+# 否则即使 Key 正确也会返回 400 Model Not Exist。
+DEFAULT_MODEL = "deepseek-chat"
+MODEL_ALIASES = {
+    "deepseek-flash": "deepseek-chat",
+    "deepseek-v3": "deepseek-chat",
+    "deepseek-chat-v3": "deepseek-chat",
+    "deepseek-coder": "deepseek-chat",
+    "deepseek-r1": "deepseek-reasoner",
+    "deepseek-reasoner-v1": "deepseek-reasoner",
+}
+KEY_HOME = "https://platform.deepseek.com/api_keys"
+
+
+def resolve_model(name: str) -> str:
+    """把配置里的模型名归一到 DeepSeek 官方模型名。"""
+    raw = (name or "").strip()
+    if not raw:
+        return DEFAULT_MODEL
+    return MODEL_ALIASES.get(raw.lower(), raw)
+
+
+def _explain_error(status: int, message: str) -> str:
+    """把接口原始错误翻译成能照着做的中文提示。"""
+    msg = (message or "").strip()
+    low = msg.lower()
+    if status in (401, 403) or ("authentication fails" in low) or ("api key" in low and "invalid" in low):
+        return (
+            f"API Key 鉴权失败（远端原话：{msg or 'invalid key'}）。"
+            f"这个 Key 无效或已吊销，请到 {KEY_HOME} 重新生成一个 sk- 开头的 Key，"
+            "复制时别带空格和引号，粘贴到上方输入框后重试。"
+        )
+    if status == 402 or "insufficient balance" in low or "insufficient_quota" in low:
+        return f"账户余额不足（远端原话：{msg}）。请到 DeepSeek 开放平台充值后重试。"
+    if status == 429 or "rate limit" in low:
+        return f"请求被限流（远端原话：{msg}）。等几秒再点，或降低刷新频率。"
+    if status == 404 or "model not exist" in low or "model_not_found" in low:
+        return (
+            f"模型名不被接受（远端原话：{msg}）。"
+            "请把 watchlist.yaml 里的 deepseek.model 改成 deepseek-chat 或 deepseek-reasoner。"
+        )
+    return f"接口返回 {status}：{msg or '未知错误'}"
+
 
 # ---------------------------------------------------------------------------
 # 上下文构造
@@ -87,7 +131,7 @@ def _post_chat(payload: Dict, api_key: str, base_url: str, timeout: int) -> Tupl
             msg = err.get("message") if isinstance(err, dict) else str(err)
         except Exception:
             msg = resp.text[:200]
-        return None, f"接口返回 {resp.status_code}：{msg or '未知错误'}"
+        return None, _explain_error(resp.status_code, msg)
 
     try:
         data = resp.json()
@@ -111,9 +155,14 @@ def chat(messages: List[Dict[str, str]], cfg: Dict,
     key = (api_key or cfg.get("api_key") or "").strip()
     if not key:
         return "", "未填写 DeepSeek API Key，请在 AI 助手页填入后再试。"
+    if not key.startswith("sk-"):
+        return "", (
+            "这个 Key 不像 DeepSeek 平台的 Key（平台上生成的都以 sk- 开头）。"
+            f"请到 {KEY_HOME} 复制完整 Key 后重试。"
+        )
 
     payload = {
-        "model": cfg.get("model", "deepseek-flash"),
+        "model": resolve_model(cfg.get("model", DEFAULT_MODEL)),
         "messages": messages,
         "temperature": cfg.get("temperature", 0.3),
         "max_tokens": cfg.get("max_tokens", 1024),

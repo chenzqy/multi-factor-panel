@@ -2,6 +2,18 @@
 
 遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.1] - 2026-11-20
+
+修 AI 助手「填了 Key 还是调用失败」的两个坑。
+
+### 修复
+
+- 配置里的默认模型名 `deepseek-flash` 在 DeepSeek 平台并不存在，即使 Key 正确也会返回 400 `Model Not Exist`；改为官方 `deepseek-chat`，并加 `MODEL_ALIASES` 把 `deepseek-v3` / `deepseek-r1` / `deepseek-flash` 等历史名字统一归一到 `deepseek-chat` / `deepseek-reasoner`
+- 401 不再只丢一句英文原文：`_explain_error` 把 401/403、402 余额不足、429 限流、404 模型名错误分别翻成能照着做的中文提示，并给出 Key 申请地址
+- Key 格式预检：不是 `sk-` 开头时直接提示，不再白跑一次网络请求
+- AI 助手页新增「**测试连接**」按钮：只发一次最小请求，立刻告诉你这个 Key 到底能不能用，状态栏显示「Key 可用 ✓（模型名）」或「Key 不可用」
+- 输入框占位文案改为提示到 `platform.deepseek.com/api_keys` 取 Key
+
 ## [1.1.0] - 2026-11-20
 
 全面提速：从「打开先冻 15 秒」做到「窗口一出现就有数据，刷新不挡手」。

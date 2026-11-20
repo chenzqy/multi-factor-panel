@@ -262,7 +262,7 @@ news:
 deepseek:
   api_key: ''
   base_url: https://api.deepseek.com
-  model: deepseek-flash
+  model: deepseek-chat
   temperature: 0.3
   max_tokens: 1024
   timeout: 60

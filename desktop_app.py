@@ -829,11 +829,18 @@ class MainWindow(QtWidgets.QMainWindow):
         key_row.addWidget(QtWidgets.QLabel("DeepSeek API Key："))
         self.ai_key_edit = QtWidgets.QLineEdit()
         self.ai_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.ai_key_edit.setPlaceholderText("填入后本次会话有效；也可写入 watchlist.yaml 的 deepseek.api_key")
+        self.ai_key_edit.setPlaceholderText(
+            "粘一个 sk- 开头的 Key（platform.deepseek.com/api_keys 生成）；"
+            "本次会话有效，也可写进 watchlist.yaml 的 deepseek.api_key"
+        )
         saved_key = (self.config.get("deepseek", {}) or {}).get("api_key", "")
         if saved_key:
             self.ai_key_edit.setText(saved_key)
         key_row.addWidget(self.ai_key_edit)
+        self.ai_test_btn = QtWidgets.QPushButton("测试连接")
+        self.ai_test_btn.setToolTip("只发一次最小请求，确认 Key 是否可用")
+        self.ai_test_btn.clicked.connect(self._ai_test_key)
+        key_row.addWidget(self.ai_test_btn)
         self.ai_status = QtWidgets.QLabel("")
         key_row.addWidget(self.ai_status)
         layout.addLayout(key_row)
@@ -902,6 +909,29 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.ai_status.setText("")
             self._append_chat("assistant", text)
+
+    def _ai_test_key(self) -> None:
+        """只发一次最小请求，判断 Key 能不能用。"""
+        key = self._ai_key()
+        if not key:
+            self.ai_status.setText("先填 Key")
+            return
+        self.ai_test_btn.setEnabled(False)
+        self.ai_status.setText("测试中…")
+        messages = [{"role": "user", "content": "ping，请只回复 ok"}]
+        self.ai_worker = AiWorker(messages, self._ai_cfg(), key)
+        self.ai_worker.done.connect(self._on_ai_test_done)
+        self.ai_worker.start()
+
+    def _on_ai_test_done(self, text: str, error: str) -> None:
+        self.ai_test_btn.setEnabled(True)
+        if error:
+            self.ai_status.setText("Key 不可用")
+            self._append_chat("assistant", f"⚠️ 测试失败：{error}")
+            return
+        model = ai_assistant.resolve_model(self._ai_cfg().get("model", ""))
+        self.ai_status.setText(f"Key 可用 ✓（{model}）")
+        self._append_chat("assistant", f"连接正常，模型 {model} 已返回响应。")
 
     def _ai_context_messages(self, question: str, include_stocks: bool) -> list:
         parts = []
